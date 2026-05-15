@@ -1,0 +1,7 @@
+asyncua
+pymodbus
+python-snap7 
+lupa
+pyyaml
+watchdog
+PyQt6

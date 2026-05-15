@@ -1,0 +1,23 @@
+drivers:
+  - name: mb_tcp_1
+    type: modbus_tcp
+    host: 192.168.1.100
+    port: 502
+    unit: 1
+    retry_delay: 3.0
+    poll_interval: 0.5  # сек
+
+tags:
+  - name: Temp_Sensor_1
+    source: mb_tcp_1
+    address: 4x0010
+    type: float32
+  - name: Valve_Status
+    source: mb_tcp_1
+    address: 0x0050
+    type: bool
+  - name: Setpoint_Internal
+    source: internal
+    address: ""
+    type: float32
+    value: 72.5
