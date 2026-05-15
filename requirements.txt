@@ -5,3 +5,4 @@ lupa
 pyyaml
 watchdog
 PyQt6
+ruamel.yaml

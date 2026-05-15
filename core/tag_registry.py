@@ -45,6 +45,20 @@ class TagRegistry:
         self.tags.update(new_tags)
         print(f"[CONFIG] Loaded {len(new_tags)} tags.")
 
+    async def add_tag(self, tag: Tag):
+        async with self._lock:
+            self.tags[tag.name] = tag
+
+    async def remove_tag(self, name: str):
+        async with self._lock:
+            self.tags.pop(name, None)
+
+    async def update_tag(self, old_name: str, new_tag: Tag):
+        async with self._lock:
+            if old_name in self.tags:
+                del self.tags[old_name]
+            self.tags[new_tag.name] = new_tag
+
 
 class ConfigWatcher(FileSystemEventHandler):
     def __init__(self, registry: TagRegistry, path: Path):

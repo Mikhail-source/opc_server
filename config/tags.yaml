@@ -1,40 +1,40 @@
+---
 drivers:
-  - name: mb_tcp_1
-    type: modbus_tcp
-    host: 127.0.0.1
-    port: 5020
-    poll_interval: 0.5
+- name: mb_tcp_1
+  type: modbus_tcp
+  host: 127.0.0.1
+  port: 5020
+  poll_interval: 0.5
 
-  - name: internal_1
-    type: internal
-    persistence_file: data/my_tags.json  # опционально
-    save_interval: 5.0                   # опционально
+- name: internal_1
+  type: internal
+  persistence_file: data/my_tags.json    # опционально
+  save_interval: 5.0                     # опционально
 
 tags:
   # Внешние теги (Modbus)
-  - name: Temp_Reactor
-    source: mb_tcp_1
-    address: 4x0010
-    type: float32
-
-  # Внутренние теги
-  - name: Setpoint_Temp
-    source: internal
-    type: float32
-    value: 75.0                    # начальное значение
-
-  - name: Alarm_HighTemp
-    source: internal
-    type: bool
-    value: false
-
-  - name: Calculated_Avg
-    source: internal
-    type: float32
-    value: 0.0
-    description: "Среднее за 5 минут"  # доп. поле, игнорируется, но не ломает
-
-  - name: Temp
-    source: internal
-    type: float32
-    value: 5.0
+- name: Temp_Reactor
+  source: mb_tcp_1
+  address: 4x0010
+  type: float32
+  value:
+- name: Setpoint_Temp
+  source: internal
+  address: ''
+  type: float32
+  value: 75.0
+- name: Alarm_HighTemp
+  source: internal
+  address: ''
+  type: bool
+  value: false
+- name: Calculated_Avg
+  source: internal
+  address: ''
+  type: float32
+  value: 0.0
+- name: Temp
+  source: internal
+  address: ''
+  type: float32
+  value: 5.0
