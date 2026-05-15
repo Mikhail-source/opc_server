@@ -1,23 +1,28 @@
 import asyncio
 import logging
 import time
+import threading
+import math
 from pathlib import Path
 from lupa import LuaRuntime
 
 logger = logging.getLogger(__name__)
 
 class LuaEngine:
-    def __init__(self, registry):
+    def __init__(self, registry, log_queue=None):
         self.registry = registry
+        self.log_queue = log_queue  # ← новая очередь для GUI
+        self._lua_lock = threading.Lock()
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         
-        # 1️⃣ Регистрируем функции в глобальной области Lua ОДИН РАЗ
         gl = self.lua.globals()
         gl['tag_get'] = self._tag_get
         gl['tag_set'] = self._tag_set
-        gl['log']     = self._log
+        gl['log']     = self._log  # ← переопределён ниже
         gl['time']    = time.time
-        
+        gl['math']    = math
+        gl['heavy_compute'] = self._heavy_compute
+
         self._func = None
         self._running = False
         self._task = None
@@ -85,7 +90,13 @@ class LuaEngine:
             )
 
     def _log(self, msg: str):
+        # Вывод в стандартный логгер + отправка в GUI
         logger.info(f"[LUA] {msg}")
+        if self.log_queue:
+            try:
+                self.log_queue.put_nowait(f"{time.strftime('%H:%M:%S')} {msg}")
+            except:
+                pass  # Пропускаем, если очередь переполнена
 
     def reload(self):
         """Перезагрузка скрипта без остановки сервера"""
