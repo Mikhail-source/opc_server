@@ -1,23 +1,40 @@
 drivers:
   - name: mb_tcp_1
     type: modbus_tcp
-    host: 192.168.1.100
-    port: 502
-    unit: 1
-    retry_delay: 3.0
-    poll_interval: 0.5  # сек
+    host: 127.0.0.1
+    port: 5020
+    poll_interval: 0.5
+
+  - name: internal_1
+    type: internal
+    persistence_file: data/my_tags.json  # опционально
+    save_interval: 5.0                   # опционально
 
 tags:
-  - name: Temp_Sensor_1
+  # Внешние теги (Modbus)
+  - name: Temp_Reactor
     source: mb_tcp_1
     address: 4x0010
     type: float32
-  - name: Valve_Status
-    source: mb_tcp_1
-    address: 0x0050
-    type: bool
-  - name: Setpoint_Internal
+
+  # Внутренние теги
+  - name: Setpoint_Temp
     source: internal
-    address: ""
     type: float32
-    value: 72.5
+    value: 75.0                    # начальное значение
+
+  - name: Alarm_HighTemp
+    source: internal
+    type: bool
+    value: false
+
+  - name: Calculated_Avg
+    source: internal
+    type: float32
+    value: 0.0
+    description: "Среднее за 5 минут"  # доп. поле, игнорируется, но не ломает
+
+  - name: Temp
+    source: internal
+    type: float32
+    value: 5.0

@@ -30,8 +30,16 @@ class TagRegistry:
         valid_fields = {f.name for f in dataclasses.fields(Tag)}
 
         for t in cfg.get("tags", []):
-            # Оставляем только те ключи, которые есть в Tag
             tag_kwargs = {k: v for k, v in t.items() if k in valid_fields}
+            
+            # Если источник — internal, регистрируем в InternalDriver
+            if t.get("source") == "internal":
+                # Убедимся, что значение инициализировано
+                if "value" not in tag_kwargs:
+                    # Дефолтные значения по типу
+                    defaults = {"bool": False, "int16": 0, "uint16": 0, "int32": 0, "uint32": 0, "float32": 0.0, "string": ""}
+                    tag_kwargs["value"] = defaults.get(t.get("type", "float32"), None)
+            
             new_tags[t["name"]] = Tag(**tag_kwargs)
             
         self.tags.update(new_tags)

@@ -1,4 +1,3 @@
-# main.py
 import asyncio
 import logging
 import yaml
@@ -7,6 +6,7 @@ from watchdog.observers import Observer
 from core.tag_registry import TagRegistry, ConfigWatcher
 from drivers.modbus_tcp import ModbusTcpDriver
 from core.opcua_server import OPCUAServer
+from drivers.internal import InternalDriver
 
 # Настройка логирования
 logging.basicConfig(
@@ -37,11 +37,16 @@ async def main():
     # 3. Инициализация драйверов
     drivers_cfg = yaml.safe_load(cfg_path.read_text()).get("drivers", [])
     drivers = {}
+    
     for d_cfg in drivers_cfg:
         if d_cfg["type"] == "modbus_tcp":
             driver = ModbusTcpDriver(d_cfg)
             drivers[d_cfg["name"]] = driver
-            logger.info(f"Создан драйвер {d_cfg['name']} → {d_cfg['host']}:{d_cfg['port']}")
+        elif d_cfg["type"] == "internal":
+            driver = InternalDriver(d_cfg)
+            drivers[d_cfg["name"]] = driver
+            await driver.connect()  # InternalDriver готов сразу
+            # InternalDriver не требует poll_loop — он работает по запросу
 
     # 4. Запуск опросов
     poll_tasks = []
