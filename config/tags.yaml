@@ -13,11 +13,6 @@ drivers:
 
 tags:
   # Внешние теги (Modbus)
-- name: Temp_Reactor
-  source: mb_tcp_1
-  address: 4x0010
-  type: float32
-  value:
 - name: Setpoint_Temp
   source: internal
   address: ''
@@ -38,3 +33,8 @@ tags:
   address: ''
   type: float32
   value: 5.0
+- name: Temp_Reactor
+  source: internal
+  address: ''
+  type: float32
+  value: 10.6

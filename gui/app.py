@@ -5,7 +5,7 @@ import threading
 import queue
 from pathlib import Path
 from typing import Dict, Any, Optional
-
+from core.scripting import LuaEngine
 from ruamel.yaml import YAML
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidgetItem,
                              QVBoxLayout, QHBoxLayout, QWidget, QHeaderView, QLabel,
@@ -97,6 +97,8 @@ class ServerBackend:
         self.registry = TagRegistry()
         self.running = False
         self._stop_event = threading.Event()
+        self.lua_engine = LuaEngine(self.registry)
+        self.script_path = Path("scripts/main.lua")
 
     async def _run_async(self):
         if not self.cfg_path.exists():
@@ -106,6 +108,8 @@ class ServerBackend:
 
         self.registry.load_config(self.cfg_path)
         logger.info(f"✅ Загружено тегов: {len(self.registry.tags)}")
+        self.lua_engine.load_script(self.script_path)
+        await self.lua_engine.start(interval=1.0)  # Выполнять раз в секунду
 
         # Hot-reload для внешних правок
         event_handler = ConfigWatcher(self.registry, self.cfg_path)
@@ -142,6 +146,7 @@ class ServerBackend:
                 pass
             await asyncio.sleep(1.0)
 
+        await self.lua_engine.stop()
         observer.stop()
         observer.join()
 
@@ -206,6 +211,27 @@ class ServerBackend:
     def send_command(self, cmd: Dict):
         self.cmd_queue.put_nowait(cmd)
 
+    async def _process_commands(self):
+        while not self.cmd_queue.empty():
+            try:
+                cmd = self.cmd_queue.get_nowait()
+                action = cmd["action"]
+                data = cmd.get("data", {})
+                
+                if action == "add_tag":
+                    await self.registry.add_tag(Tag(**data))
+                    await self._save_config()
+                elif action == "update_tag":
+                    await self.registry.update_tag(data["old_name"], Tag(**data["new"]))
+                    await self._save_config()
+                elif action == "delete_tag":
+                    await self.registry.remove_tag(data["name"])
+                    await self._save_config()
+                elif action == "reload_script":
+                    self.lua_engine.reload()
+                self.cmd_queue.task_done()
+            except queue.Empty:
+                break
 
 class TagMonitor(QMainWindow):
     def __init__(self, cfg_path: Path = Path("config/tags.yaml")):
@@ -224,6 +250,9 @@ class TagMonitor(QMainWindow):
         self.btn_add = QPushButton("➕ Добавить тег")
         self.btn_edit = QPushButton("✏️ Изменить")
         self.btn_del = QPushButton("🗑 Удалить")
+        self.btn_script = QPushButton("🔄 Перезагрузить скрипт")
+        self.btn_script.clicked.connect(self._reload_script)
+        toolbar.addWidget(self.btn_script)
         toolbar.addWidget(self.btn_add)
         toolbar.addWidget(self.btn_edit)
         toolbar.addWidget(self.btn_del)
@@ -334,6 +363,8 @@ class TagMonitor(QMainWindow):
         logger.info("🛑 Сервер остановлен. Закрытие окна.")
         event.accept()
 
+    def _reload_script(self):
+        self.backend.send_command({"action": "reload_script", "data": {}})
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
