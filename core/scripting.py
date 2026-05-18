@@ -18,11 +18,20 @@ class LuaEngine:
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         
         gl = self.lua.globals()
+        
+        # 🔹 Функции для работы с тегами
         gl['tag_get'] = self._tag_get
         gl['tag_set'] = self._tag_set
         gl['log'] = self._log
         gl['time'] = time.time
-        gl['math'] = math
+        
+        # 🔹 Математика: комбинируем Python math + Lua-совместимые функции
+        gl['math'] = math  # sin, cos, sqrt, pi, exp, log и т.д.
+        gl['max'] = max    # ← ДОБАВИТЬ: математический максимум (из builtins)
+        gl['min'] = min    # ← ДОБАВИТЬ: математический минимум (из builtins)
+        gl['abs'] = abs    # ← Опционально: модуль числа
+        
+        # 🔹 Тяжёлые вычисления в фоне
         gl['heavy_compute'] = self._heavy_compute
         
         self._func = None
