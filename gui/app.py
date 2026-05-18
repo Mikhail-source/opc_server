@@ -1,429 +1,363 @@
-import sys
-import asyncio
-import logging
-import threading
-import queue
-import time
+# gui/app.py
+import sys, asyncio, logging, threading, queue, time
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from ruamel.yaml import YAML
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidgetItem,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QTreeWidget, QTreeWidgetItem,
                              QVBoxLayout, QHBoxLayout, QWidget, QHeaderView, QLabel,
                              QPushButton, QDialog, QFormLayout, QLineEdit, QComboBox,
-                             QMessageBox, QAbstractItemView)
+                             QMessageBox, QAbstractItemView, QFileDialog, QMenu, QMenuBar)
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QColor
 
-# Локальные модули
 from core.tag_registry import TagRegistry, ConfigWatcher
 from drivers.modbus_tcp import ModbusTcpDriver
 from drivers.internal import InternalDriver
 from core.scripting import LuaEngine
+from core.project_manager import ProjectManager
 from shared.models import Tag
 from gui.script_editor import ScriptEditorDialog
-from watchdog.observers import Observer
-from PyQt6.QtWidgets import QTreeView
-from gui.tag_tree_model import TagTreeModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)-7s] %(message)s")
 logger = logging.getLogger("GUI")
 
-# ------------------------------------------------------------------
-# Диалог редактирования тега
-# ------------------------------------------------------------------
 class TagEditDialog(QDialog):
     def __init__(self, parent=None, tag_data: Optional[Dict] = None):
         super().__init__(parent)
         self.setWindowTitle("Редактор тега" if tag_data else "Новый тег")
-        self.setModal(True)
-        self.resize(420, 400)
+        self.setModal(True); self.resize(420, 400)
         self.tag_data = tag_data or {}
-
         layout = QFormLayout()
         self.name_edit = QLineEdit(self.tag_data.get("name", ""))
-        self.path_edit = QLineEdit(self.tag_data.get("path", ""))          # ← НОВОЕ ПОЛЕ
+        self.path_edit = QLineEdit(self.tag_data.get("path", ""))
         self.path_edit.setPlaceholderText("Цех/Участок/Оборудование")
-        
         self.source_combo = QComboBox()
         self.source_combo.addItems(["internal", "modbus_tcp"])
         self.source_combo.setCurrentText(self.tag_data.get("source", "internal"))
-
         self.address_edit = QLineEdit(self.tag_data.get("address", ""))
         self.type_combo = QComboBox()
         self.type_combo.addItems(["float32", "bool", "int16", "uint16", "int32", "uint32", "string"])
         self.type_combo.setCurrentText(self.tag_data.get("type", "float32"))
         self.value_edit = QLineEdit(str(self.tag_data.get("value", "") if self.tag_data.get("value") is not None else ""))
-
-        # Порядок добавления важен для визуального восприятия
         layout.addRow("Имя:", self.name_edit)
-        layout.addRow("Путь (иерархия):", self.path_edit)  # ← добавлено
+        layout.addRow("Путь (иерархия):", self.path_edit)
         layout.addRow("Источник:", self.source_combo)
         layout.addRow("Адрес:", self.address_edit)
         layout.addRow("Тип:", self.type_combo)
         layout.addRow("Нач. значение:", self.value_edit)
-
         btn_layout = QHBoxLayout()
-        save_btn = QPushButton("💾 Сохранить")
-        cancel_btn = QPushButton("❌ Отмена")
-        save_btn.clicked.connect(self.accept)
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(save_btn)
-        btn_layout.addWidget(cancel_btn)
+        save_btn = QPushButton("💾 Сохранить"); cancel_btn = QPushButton("❌ Отмена")
+        save_btn.clicked.connect(self.accept); cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(save_btn); btn_layout.addWidget(cancel_btn)
         layout.addRow(btn_layout)
         self.setLayout(layout)
 
     def get_data(self) -> Dict[str, Any]:
-        val_str = self.value_edit.text().strip()
-        t = self.type_combo.currentText()
-        val = None  # По умолчанию None (тег без начального значения)
-
-        if val_str:  # Парсим только если поле не пустое
+        val_str = self.value_edit.text().strip(); t = self.type_combo.currentText(); val = None
+        if val_str:
             try:
-                if t == "bool":
-                    val = val_str.lower() in ("1", "true", "yes", "вкл", "on")
-                elif t in ("int16", "uint16", "int32", "uint32"):
-                    val = int(val_str)
-                elif t == "float32":
-                    val = float(val_str)
-                else:
-                    val = val_str
+                if t == "bool": val = val_str.lower() in ("1", "true", "yes", "вкл", "on")
+                elif t in ("int16", "uint16", "int32", "uint32"): val = int(val_str)
+                elif t == "float32": val = float(val_str)
+                else: val = val_str
             except ValueError:
-                QMessageBox.warning(self, "Ошибка формата", f"Неверный формат значения для типа {t}")
-                return {}  # Пустой dict сигнализирует об ошибке валидации
+                QMessageBox.warning(self, "Ошибка формата", f"Неверный формат для типа {t}")
+                return {}
+        return {"name": self.name_edit.text().strip(), "path": self.path_edit.text().strip(),
+                "source": self.source_combo.currentText(), "address": self.address_edit.text().strip(),
+                "type": self.type_combo.currentText(), "value": val}
 
-        return {
-            "name": self.name_edit.text().strip(),
-            "path": self.path_edit.text().strip(),
-            "source": self.source_combo.currentText(),
-            "address": self.address_edit.text().strip(),
-            "type": self.type_combo.currentText(),
-            "value": val  # Может быть None
-        }
-
-
-# ------------------------------------------------------------------
-# Асинхронный бэкенд (работает в отдельном потоке)
-# ------------------------------------------------------------------
 class ServerBackend:
-    def __init__(self, update_queue: queue.Queue, cmd_queue: queue.Queue, log_queue: queue.Queue, cfg_path: Path):
-        self.update_queue = update_queue
-        self.cmd_queue = cmd_queue
-        self.log_queue = log_queue
-        self.cfg_path = cfg_path
+    def __init__(self, update_q, cmd_q, log_q, project_data: Dict):
+        self.update_queue, self.cmd_queue, self.log_queue = update_q, cmd_q, log_q
+        self.project = project_data
         self.registry = TagRegistry()
         self.lua_engine = LuaEngine(self.registry, log_queue=self.log_queue)
-        self.running = False
-        self._stop_event = threading.Event()
+        self.running = False; self._stop_event = threading.Event()
 
     async def _run_async(self):
-        if not self.cfg_path.exists():
-            logger.error(f"❌ Конфиг не найден: {self.cfg_path}")
-            self._stop_event.set()
-            return
+        # 1. Загрузка тегов из проекта
+        tags_data = self.project.get("tags", [])
+        self.registry.tags = {t["name"]: Tag(**{k:v for k,v in t.items() if k in ["name","path","source","address","type","value"]}) for t in tags_data}
+        logger.info(f"✅ Загружено тегов из проекта: {len(self.registry.tags)}")
 
-        self.registry.load_config(self.cfg_path)
-        logger.info(f"✅ Загружено тегов: {len(self.registry.tags)}")
+        # 2. Lua
+        script_content = self.project.get("script", {}).get("content", "")
+        self.lua_engine.load_script(script_content)
+        await self.lua_engine.start(interval=self.project.get("settings", {}).get("script_interval", 1.0))
 
-        # Hot-reload конфигурации
-        event_handler = ConfigWatcher(self.registry, self.cfg_path)
-        observer = Observer()
-        observer.schedule(event_handler, path=str(self.cfg_path.parent), recursive=False)
-        observer.start()
-
-        # Инициализация Lua
-        script_path = Path("scripts/main.lua")
-        self.lua_engine.load_script(script_path)
-        await self.lua_engine.start(interval=1.0)
-
-        # Инициализация драйверов
-        ruamel = YAML()
-        ruamel.preserve_quotes = True
-        drivers_cfg = ruamel.load(self.cfg_path.read_text()).get("drivers", [])
+        # 3. Драйверы
+        drivers_cfg = self.project.get("drivers", [])
         tasks = []
-        for d_cfg in drivers_cfg:
-            if d_cfg["type"] == "modbus_tcp":
-                driver = ModbusTcpDriver(d_cfg)
-                await driver.connect()
-                tasks.append(asyncio.create_task(driver.poll_loop(self.registry, d_cfg.get("poll_interval", 1.0))))
-            elif d_cfg["type"] == "internal":
-                driver = InternalDriver(d_cfg)
-                await driver.connect()
-                tasks.append(asyncio.create_task(driver.poll_loop(self.registry, d_cfg.get("poll_interval", 10.0))))
+        for d in drivers_cfg:
+            if d["type"] == "modbus_tcp":
+                drv = ModbusTcpDriver(d); await drv.connect()
+                tasks.append(asyncio.create_task(drv.poll_loop(self.registry, d.get("poll_interval", 1.0))))
+            elif d["type"] == "internal":
+                drv = InternalDriver(d); await drv.connect()
+                tasks.append(asyncio.create_task(drv.poll_loop(self.registry, d.get("poll_interval", 10.0))))
 
         self.running = True
         while not self._stop_event.is_set():
             await self._process_commands()
-            # Отправка снапшота в GUI
-            snapshot = {name: {"value": t.value, "quality": t.quality, "timestamp": t.timestamp}
-                        for name, t in self.registry.tags.items()}
+            snapshot = {n: {"value": t.value, "quality": t.quality, "timestamp": t.timestamp} for n, t in self.registry.tags.items()}
             try: self.update_queue.put_nowait(snapshot)
             except queue.Full: pass
             await asyncio.sleep(1.0)
 
         await self.lua_engine.stop()
-        observer.stop()
-        observer.join()
 
     async def _process_commands(self):
         while not self.cmd_queue.empty():
             try:
-                cmd = self.cmd_queue.get_nowait()
-                action = cmd["action"]
-                data = cmd.get("data", {})
-                
+                cmd = self.cmd_queue.get_nowait(); action = cmd["action"]; data = cmd.get("data", {})
                 if action == "add_tag":
-                    try:
-                        # Формируем dict с гарантированными ключами
-                        tag_data = {
-                            "name": data.get("name"),
-                            "path": data.get("path", ""),
-                            "source": data.get("source", "internal"),
-                            "address": data.get("address", ""),
-                            "type": data.get("type", "float32"),
-                            "value": data.get("value")  # Явно может быть None
-                        }
-                        await self.registry.add_tag(Tag(**tag_data))
-                        await self._save_config()
-                        logger.info(f"✅ Тег '{data['name']}' успешно добавлен")
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка добавления тега '{data.get('name')}': {e}")
-                        
+                    tag = Tag(**{k:data.get(k) for k in ["name","path","source","address","type","value"]})
+                    self.registry.tags[tag.name] = tag
+                    self.project.setdefault("tags", []).append({**data})
                 elif action == "update_tag":
-                    await self.registry.update_tag(data["old_name"], Tag(**data["new"]))
-                    await self._save_config()
+                    old = data["old_name"]; new = Tag(**data["new"])
+                    self.registry.tags.pop(old, None); self.registry.tags[new.name] = new
+                    for i, t in enumerate(self.project["tags"]):
+                        if t.get("name") == old: self.project["tags"][i] = {**data["new"]}; break
                 elif action == "delete_tag":
-                    await self.registry.remove_tag(data["name"])
-                    await self._save_config()
+                    self.registry.tags.pop(data["name"], None)
+                    self.project["tags"] = [t for t in self.project["tags"] if t.get("name") != data["name"]]
                 elif action == "reload_script":
-                    self.lua_engine.reload()
-                    
+                    self.lua_engine.reload(data.get("content", ""))
                 self.cmd_queue.task_done()
-            except queue.Empty:
-                break
-
-    async def _save_config(self):
-        try:
-            ruamel = YAML()
-            ruamel.preserve_quotes = True
-            cfg = ruamel.load(self.cfg_path.read_text())
-            
-            tags_list = []
-            for t in self.registry.tags.values():
-                tag_dict = {
-                    "name": t.name,
-                    "path": getattr(t, 'path', ''),
-                    "source": t.source,
-                    "address": t.address,
-                    "type": t.type
-                }
-                # Сохраняем value только если оно задано (избегаем лишнего null)
-                if t.value is not None:
-                    tag_dict["value"] = t.value
-                tags_list.append(tag_dict)
-                
-            cfg["tags"] = tags_list
-            with open(self.cfg_path, "w", encoding="utf-8") as f:
-                ruamel.dump(cfg, f)
-            logger.info("💾 Конфиг сохранён")
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения конфига: {e}")
+            except queue.Empty: break
 
     def start(self):
-        self._thread = threading.Thread(target=self._run_threaded, daemon=True)
-        self._thread.start()
-
+        threading.Thread(target=self._run_threaded, daemon=True).start()
     def _run_threaded(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
         try: loop.run_until_complete(self._run_async())
         except Exception as e: logger.error(f"Backend error: {e}")
         finally: loop.close()
+    def stop(self): self._stop_event.set(); self.running = False
+    def send_command(self, cmd: Dict): self.cmd_queue.put_nowait(cmd)
 
-    def stop(self):
-        self._stop_event.set()
-        self.running = False
-
-    def send_command(self, cmd: Dict):
-        self.cmd_queue.put_nowait(cmd)
-
-
-# ------------------------------------------------------------------
-# Главное окно приложения
-# ------------------------------------------------------------------
 class TagMonitor(QMainWindow):
-    def __init__(self, cfg_path: Path = Path("config/tags.yaml")):
+    def __init__(self):
         super().__init__()
         self.setWindowTitle("OPC Server Manager")
         self.resize(1300, 800)
-        self.cfg_path = cfg_path
+        self.proj_mgr = ProjectManager()
+        self._setup_menu()
+        self._init_ui()
+        self._load_last_project()
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+    def _setup_menu(self):
+        mb = self.menuBar()
+        file_menu = mb.addMenu("📁 Файл")
+        file_menu.addAction("🆕 Новый проект", self.new_project)
+        file_menu.addAction("📂 Открыть...", self.open_project)
+        file_menu.addAction("💾 Сохранить", self.save_project)
+        file_menu.addAction("💾 Сохранить как...", self.save_as_project)
+        file_menu.addSeparator()
+        self.recent_menu = file_menu.addMenu("📜 Последние")
+        self._update_recent_menu()
+        file_menu.addSeparator()
+        file_menu.addAction("🚪 Выход", self.close)
 
-        # Toolbar
+    def _update_recent_menu(self):
+        self.recent_menu.clear()
+        for p in self.proj_mgr.get_recent_projects():
+            # Показываем только имя файла, но храним полный путь
+            act = self.recent_menu.addAction(Path(p).name)
+            act.triggered.connect(lambda _, path=p: self._load_project(Path(path)))
+
+    def _init_ui(self):
+        central = QWidget(); self.setCentralWidget(central); layout = QVBoxLayout(central)
         toolbar = QHBoxLayout()
-        self.btn_add = QPushButton("➕ Добавить тег")
-        self.btn_edit = QPushButton("✏️ Изменить")
-        self.btn_del = QPushButton("🗑 Удалить")
-        self.btn_scripts = QPushButton("📝 Скрипты")
-        self.btn_reload_script = QPushButton("🔄 Перезагрузить скрипт")
-        for btn in (self.btn_add, self.btn_edit, self.btn_del, self.btn_scripts, self.btn_reload_script):
-            toolbar.addWidget(btn)
+        for txt, slot in [("➕ Добавить", self._add_tag), ("✏️ Изменить", self._edit_tag),
+                          ("🗑 Удалить", self._delete_tag), ("📝 Скрипты", lambda: self._open_script_editor()),
+                          ("🔄 Перезагрузить скрипт", lambda: self.backend.send_command({"action":"reload_script","data":{"content": self.script_editor.editor.toPlainText()}}))]:
+            b = QPushButton(txt); b.clicked.connect(slot); toolbar.addWidget(b)
         toolbar.addStretch()
-        self.status_lbl = QLabel("⏳ Подключение...")
-        toolbar.addWidget(self.status_lbl)
+
+        self.project_name_lbl = QLabel("📁 Проект: Не открыт")
+        self.project_name_lbl.setStyleSheet("font-weight: bold; color: #0055aa; padding: 0 15px; font-size: 13px;")
+        toolbar.addWidget(self.project_name_lbl)
+
+        self.status_lbl = QLabel("⏳ Ожидание проекта..."); toolbar.addWidget(self.status_lbl)
         layout.addLayout(toolbar)
 
-        # Tree
-        self.tree_view = QTreeView()
-        self.tree_view.setAlternatingRowColors(True)
-        self.tree_view.setAnimated(True)
-        self.tree_view.setIndentation(20)
-        self.tree_view.setSortingEnabled(True)
-        self.tree_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tree_view.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
+        self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Тег", "Значение", "Качество", "Источник"])
+        self.tree.setAlternatingRowColors(True); self.tree.setAnimated(True); self.tree.setIndentation(20)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        layout.addWidget(self.tree)
 
-        self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree_view.customContextMenuRequested.connect(self._show_tree_context_menu)
-        
-        # Модель дерева
-        self.tree_model = TagTreeModel()
-        self.tree_view.setModel(self.tree_model.model)
-        
-        # Настройка колонок
-        self.tree_view.setColumnWidth(0, 300)  # Имя тега
-        self.tree_view.setColumnWidth(1, 120)  # Значение
-        self.tree_view.setColumnWidth(2, 100)  # Качество
-        self.tree_view.setColumnWidth(3, 100)  # Источник
-        
-        layout.addWidget(self.tree_view)
+        self.update_q = queue.Queue(maxsize=2)
+        self.cmd_q = queue.Queue()
+        self.log_q = queue.Queue(maxsize=200)
+        self.backend = None
+        self.script_editor = None
 
-        # Backend & Queues
-        self.update_queue = queue.Queue(maxsize=2)
-        self.cmd_queue = queue.Queue()
-        self.log_queue = queue.Queue(maxsize=200)
-        self.backend = ServerBackend(self.update_queue, self.cmd_queue, self.log_queue, cfg_path)
+        self.timer = QTimer(); self.timer.timeout.connect(self._poll_queue); self.timer.start(500)
+
+    def _load_last_project(self):
+        last = self.proj_mgr.get_last_project_path()
+        if last and last.exists():
+            self._load_project(last)
+        else:
+            self._new_empty_project()
+
+    def _load_project(self, path: Path):
+        try:
+            proj = self.proj_mgr.load_project(path)
+            self.status_lbl.setText(f"📂 Загружен: {path.name}")
+            self._start_backend(proj)
+            self._update_project_display()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить проект:\n{e}")
+            self._new_empty_project()
+
+    def _new_empty_project(self):
+        self.status_lbl.setText("📄 Новый проект")
+        self._start_backend({"project":{"name":"Новый проект"}, "drivers":[], "tags":[], "script":{"content":""}})
+        self._update_project_display()
+
+    def _start_backend(self, proj_data):
+        if self.backend: self.backend.stop()
+        self.backend = ServerBackend(self.update_q, self.cmd_q, self.log_q, proj_data)
         self.backend.start()
+        self.script_editor = ScriptEditorDialog(proj_data, lambda c: self.backend.send_command({"action":"reload_script","data":{"content":c}}), self)
+        self._tree_initialized = False
 
-        # Script Editor Dialog
-        self.script_dialog = ScriptEditorDialog(self.backend, self)
+    def _update_project_display(self):
+        """Обновляет отображение имени и пути проекта в GUI"""
+        if self.backend and self.backend.project:
+            proj_meta = self.backend.project.get("project", {})
+            name = proj_meta.get("name", "Без имени")
+            path = self.proj_mgr.project_path
+            if path:
+                self.project_name_lbl.setText(f"📁 Проект: {name}  │  📂 {path.name}")
+            else:
+                self.project_name_lbl.setText(f"📁 Проект: {name}  │  ⚠️ Не сохранён")
+        else:
+            self.project_name_lbl.setText("📁 Проект: Не открыт")
 
-        # Connections
-        self.btn_add.clicked.connect(self._add_tag)
-        self.btn_edit.clicked.connect(self._edit_tag)
-        self.btn_del.clicked.connect(self._delete_tag)
-        self.btn_scripts.clicked.connect(lambda: self.script_dialog.show())
-        self.btn_reload_script.clicked.connect(lambda: self.backend.send_command({"action": "reload_script", "data": {}}))
+    def new_project(self):
+        self._new_empty_project()
+        # Сразу предлагаем сохранить в папку проектов
+        self.save_as_project()
 
-        # Timer for GUI updates
-        self.timer = QTimer()
-        self.timer.timeout.connect(self._poll_queue)
-        self.timer.start(500)
+    def open_project(self):
+        start_dir = str(self.proj_mgr.PROJECTS_DIR)
+        path, _ = QFileDialog.getOpenFileName(self, "Открыть проект", start_dir, 
+                                              "YAML Projects (*.yaml *.yml);;All Files (*)")
+        if path: self._load_project(Path(path))
+
+    def save_project(self): self._save_proj(self.proj_mgr.project_path)
+
+    def save_as_project(self):
+        start_dir = str(self.proj_mgr.PROJECTS_DIR)
+        default_name = "новый_проект.yaml"
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить проект как", 
+                                              str(self.proj_mgr.PROJECTS_DIR / default_name), 
+                                              "YAML Projects (*.yaml)")
+        if path: self._save_proj(Path(path))
+
+    def _save_proj(self, path: Optional[Path] = None):
+        if not self.backend or not self.backend.project: return
+        if not path:
+            path, _ = QFileDialog.getSaveFileName(self, "Сохранить проект", ".", "YAML Projects (*.yaml)")
+            if not path: return; path = Path(path)
+        if self.proj_mgr.save_project(path, self.backend.project):
+            self.status_lbl.setText(f"💾 Сохранено: {path.name}")
+            self._update_recent_menu()
+            self._update_project_display()
+
+    def _open_script_editor(self):
+        if self.script_editor: self.script_editor.show()
 
     def _poll_queue(self):
-        while not self.update_queue.empty():
+        if not self.backend: return
+        while not self.update_q.empty():
             try:
-                snapshot = self.update_queue.get_nowait()
-                self._update_tree(snapshot)
-            except queue.Empty:
-                break
+                snap = self.update_q.get_nowait(); self._update_tree(snap)
+            except queue.Empty: break
+        # Обновляем логи редактора
+        if self.script_editor: self.script_editor.log_queue = self.log_q
 
-    def _update_tree(self, snapshot: Dict):
-        # Пересоздаём дерево при первом запуске
-        if not hasattr(self, '_tree_initialized') or not self._tree_initialized:
-            self.tree_model.clear()
-            for name, data in snapshot.items():
-                tag_obj = self.backend.registry.tags.get(name)
-                if tag_obj:
-                    # ✅ Безопасное получение пути: используем поле path из конфига
-                    path = getattr(tag_obj, 'path', None) or ""
-                    # Если path пустой — используем source как корневую папку
-                    if not path.strip():
-                        path = tag_obj.source or "Без группы"
-                    
-                    self.tree_model.add_tag(
-                        name=name,
-                        path=path,
-                        value=data['value'],
-                        quality=data['quality'],
-                        source=tag_obj.source
-                    )
-            self.tree_model.expand_all(self.tree_view)
+    def _update_tree(self, snap: Dict):
+        if not self._tree_initialized:
+            self.tree.clear()
+            for n, d in snap.items():
+                t = self.backend.registry.tags.get(n)
+                path = t.path if t else "Без группы"
+                parts = [p.strip() for p in path.split("/") if p.strip()]
+                parent = self.tree.invisibleRootItem()
+                for p in parts:
+                    found = None
+                    for i in range(parent.childCount()):
+                        if parent.child(i).text(0) == p: found = parent.child(i); break
+                    if not found:
+                        found = QTreeWidgetItem([p, "", "", ""]); found.setExpanded(True)
+                        for c in range(1,4): found.setForeground(c, QColor("#666666"))
+                        parent.addChild(found)
+                    parent = found
+                item = QTreeWidgetItem([n, str(d['value']) if d['value'] is not None else "---", d['quality'], t.source if t else ""])
+                if d['quality'] == "Good": item.setForeground(2, QColor("#008000"))
+                elif d['quality'] == "Bad": item.setForeground(2, QColor("#cc0000"))
+                parent.addChild(item)
             self._tree_initialized = True
         else:
-            # Обновляем только значения (быстрый режим)
-            for name, data in snapshot.items():
-                self.tree_model.update_tag(name, data['value'], data['quality'])
-        
-        self.status_lbl.setText(f"🟢 Тегов: {len(snapshot)}")
+            self._update_tree_recursive(self.tree.invisibleRootItem(), snap)
+        self.status_lbl.setText(f"🟢 Тегов: {len(snap)}")
 
-    def _get_selected_tag(self) -> Optional[str]:
-        indexes = self.tree_view.selectedIndexes()
-        if not indexes:
-            return None
-        # Получаем имя тега из первой колонки
-        item = self.tree_model.model.itemFromIndex(indexes[0])
-        if item and item.data(Qt.ItemDataRole.UserRole) == "tag":
-            return item.data(Qt.ItemDataRole.UserRole + 1)
-        return None
+    def _update_tree_recursive(self, parent, snap):
+        for i in range(parent.childCount()):
+            child = parent.child(i)
+            if child.childCount() == 0:
+                name = child.text(0)
+                if name in snap:
+                    child.setText(1, str(snap[name]['value']) if snap[name]['value'] is not None else "---")
+                    child.setText(2, snap[name]['quality'])
+                    if snap[name]['quality'] == "Good": child.setForeground(2, QColor("#008000"))
+                    elif snap[name]['quality'] == "Bad": child.setForeground(2, QColor("#cc0000"))
+            else: self._update_tree_recursive(child, snap)
 
-    
+    def _get_selected_tag(self):
+        items = self.tree.selectedItems()
+        return items[0].text(0) if items and items[0].childCount() == 0 else None
+
     def _add_tag(self):
+        if not self.backend: return
         dlg = TagEditDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             data = dlg.get_data()
-            if not data:  # Ошибка валидации уже показана в диалоге
-                return
-            if not data["name"]:
-                QMessageBox.warning(self, "Ошибка", "Имя тега не может быть пустым")
-                return
-            
-            # Отправляем команду в бэкенд
-            self.backend.send_command({"action": "add_tag", "data": data})
-            self._tree_initialized = False  # Перестроим дерево при следующем опросе
-            self.status_lbl.setText(f"➕ Добавление тега '{data['name']}'...")
+            if not data: return
+            if not data["name"]: QMessageBox.warning(self, "Ошибка", "Имя тега не может быть пустым"); return
+            self.backend.send_command({"action":"add_tag","data":data})
+            self._tree_initialized = False
 
     def _edit_tag(self):
+        if not self.backend: return
         name = self._get_selected_tag()
-        if not name: QMessageBox.information(self, "Подсказка", "Выберите тег для редактирования"); return
-        tag = self.backend.registry.tags.get(name)
-        if not tag: return
-        dlg = TagEditDialog(self, {"name": tag.name, "source": tag.source, "address": tag.address, "type": tag.type, "value": tag.value})
+        if not name: QMessageBox.information(self, "Подсказка", "Выберите тег"); return
+        t = self.backend.registry.tags.get(name)
+        if not t: return
+        dlg = TagEditDialog(self, {"name":t.name,"path":t.path,"source":t.source,"address":t.address,"type":t.type,"value":t.value})
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.backend.send_command({"action": "update_tag", "data": {"old_name": name, "new": dlg.get_data()}})
+            self.backend.send_command({"action":"update_tag","data":{"old_name":name,"new":dlg.get_data()}})
+            self._tree_initialized = False
 
     def _delete_tag(self):
+        if not self.backend: return
         name = self._get_selected_tag()
-        if not name: QMessageBox.information(self, "Подсказка", "Выберите тег для удаления"); return
+        if not name: QMessageBox.information(self, "Подсказка", "Выберите тег"); return
         if QMessageBox.question(self, "Подтверждение", f"Удалить тег '{name}'?") == QMessageBox.StandardButton.Yes:
-            self.backend.send_command({"action": "delete_tag", "data": {"name": name}})
-
-    def _show_tree_context_menu(self, pos):
-        from PyQt6.QtWidgets import QMenu
-        index = self.tree_view.indexAt(pos)
-        if not index.isValid():
-            return
-        
-        item = self.tree_model.model.itemFromIndex(index)
-        if item.data(Qt.ItemDataRole.UserRole) == "tag":
-            menu = QMenu(self)
-            menu.addAction("✏️ Изменить тег", self._edit_tag)
-            menu.addAction("🗑 Удалить тег", self._delete_tag)
-            menu.addAction("📋 Копировать имя", lambda: self._copy_tag_name(item))
-            menu.exec(self.tree_view.viewport().mapToGlobal(pos))
+            self.backend.send_command({"action":"delete_tag","data":{"name":name}})
+            self._tree_initialized = False
 
     def closeEvent(self, event):
-        self.timer.stop()
-        self.backend.stop()
-        logger.info("🛑 Сервер остановлен. Закрытие окна.")
-        event.accept()
-
+        if self.backend: self.backend.stop()
+        logger.info("🛑 Сервер остановлен."); event.accept()
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    window = TagMonitor()
-    window.show()
+    app = QApplication(sys.argv); app.setStyle("Fusion")
+    window = TagMonitor(); window.show()
     sys.exit(app.exec())

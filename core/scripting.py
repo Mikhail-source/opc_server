@@ -4,7 +4,6 @@ import logging
 import time
 import threading
 import math
-from pathlib import Path
 from lupa import LuaRuntime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -29,25 +28,18 @@ class LuaEngine:
         self._func = None
         self._running = False
         self._task = None
-        self._path = None
 
-    def load_script(self, path: Path):
-        self._path = path
-        if not path.exists():
-            logger.warning(f"📜 Script not found: {path}")
-            self._func = None
-            return
+    def load_script(self, script_content: str):
         try:
-            code = path.read_text()
-            self._func = self.lua.execute(f"return function() {code} end")
-            logger.info(f"✅ Lua script loaded: {path.name}")
+            self._func = self.lua.execute(f"return function() {script_content} end")
+            logger.info("✅ Lua script loaded from project")
         except Exception as e:
             logger.error(f"❌ Lua script load error: {e}")
             self._func = None
 
     async def start(self, interval: float = 1.0):
         if not self._func:
-            logger.warning("⚠️ Cannot start Lua engine: no script loaded")
+            logger.warning("⚠️ Cannot start Lua engine: empty script")
             return
         self._running = True
         self._task = asyncio.create_task(self._run_loop(interval))
@@ -56,15 +48,12 @@ class LuaEngine:
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+            try: await self._task
+            except asyncio.CancelledError: pass
 
     async def _run_loop(self, interval: float):
         while self._running:
             try:
-                # 🚀 Выполняем Lua в фоне, НЕ блокируя asyncio
                 await asyncio.to_thread(self._execute)
             except Exception as e:
                 logger.error(f"❌ Script execution error: {e}")
@@ -84,18 +73,14 @@ class LuaEngine:
     def _log(self, msg: str):
         logger.info(f"[LUA] {msg}")
         if self.log_queue:
-            try:
-                self.log_queue.put_nowait(f"{time.strftime('%H:%M:%S')} {msg}")
-            except:
-                pass
+            try: self.log_queue.put_nowait(f"{time.strftime('%H:%M:%S')} {msg}")
+            except: pass
 
     def _heavy_compute(self, python_callable, *args, **kwargs):
-        """Запускает CPU-bound функцию в отдельном потоке"""
         future = HEAVY_EXECUTOR.submit(python_callable, *args, **kwargs)
         return future.result(timeout=5.0)
 
-    def reload(self):
-        if self._path:
-            self.load_script(self._path)
-            if self._func and self._running:
-                logger.info("🔄 Lua script reloaded on-the-fly")
+    def reload(self, new_content: str):
+        self.load_script(new_content)
+        if self._func and self._running:
+            logger.info("🔄 Lua script reloaded on-the-fly")
