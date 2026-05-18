@@ -9,7 +9,9 @@ class Tag:
     type: str = "float32"
     source: str = ""
     path: str = ""
-    value: Any = None               # 🔹 Текущее значение (runtime, не сохраняется в конфиг)
+    value: Any = None
     quality: str = "Unknown"
     timestamp: float = 0.0
-    disconnect_value: Any = None    # 🔹 Значение при потере связи (опционально)
+    disconnect_value: Any = None
+    enabled: bool = True          # 🔹 Отключить отслеживание
+    poll_interval: float = None   # 🔹 Индивидуальный период (переопределяет драйвер)

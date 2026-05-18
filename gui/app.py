@@ -6,7 +6,8 @@ from typing import Dict, Any, Optional
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTreeWidget, QTreeWidgetItem,
                              QVBoxLayout, QHBoxLayout, QWidget, QHeaderView, QLabel,
                              QPushButton, QDialog, QFormLayout, QLineEdit, QComboBox,
-                             QMessageBox, QAbstractItemView, QFileDialog, QMenu, QMenuBar)
+                             QMessageBox, QAbstractItemView, QFileDialog, QMenu, QMenuBar,
+                             QCheckBox, QDoubleSpinBox)
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QColor
 
@@ -25,10 +26,10 @@ class TagEditDialog(QDialog):
     def __init__(self, parent=None, tag_data: Optional[Dict] = None):
         super().__init__(parent)
         self.setWindowTitle("Редактор тега" if tag_data else "Новый тег")
-        self.setModal(True); self.resize(420, 350)
+        self.setModal(True); self.resize(450, 420)
         self.tag_data = tag_data or {}
         layout = QFormLayout()
-        
+
         self.name_edit = QLineEdit(self.tag_data.get("name", ""))
         self.path_edit = QLineEdit(self.tag_data.get("path", ""))
         self.path_edit.setPlaceholderText("Цех/Участок/Оборудование")
@@ -39,19 +40,31 @@ class TagEditDialog(QDialog):
         self.type_combo = QComboBox()
         self.type_combo.addItems(["float32", "bool", "int16", "uint16", "int32", "uint32", "string"])
         self.type_combo.setCurrentText(self.tag_data.get("type", "float32"))
-        
-        # 🔹 Поле значения при дисконекте (опциональное)
+
+        self.enabled_check = QCheckBox()
+        self.enabled_check.setChecked(self.tag_data.get("enabled", True))
+
+        self.interval_spin = QDoubleSpinBox()
+        self.interval_spin.setRange(0.1, 3600)
+        self.interval_spin.setDecimals(1)
+        self.interval_spin.setSingleStep(0.1)
+        iv = self.tag_data.get("poll_interval")
+        self.interval_spin.setValue(iv if iv else 1.0)
+        self.interval_spin.setSpecialValueText("По умолчанию (драйвер)")
+
         self.disconnect_edit = QLineEdit()
         d_val = self.tag_data.get("disconnect_value")
         self.disconnect_edit.setText(str(d_val) if d_val is not None else "")
         self.disconnect_edit.setPlaceholderText("Оставьте пустым для сохранения последнего значения")
 
         layout.addRow("Имя:", self.name_edit)
-        layout.addRow("Путь (иерархия):", self.path_edit)
+        layout.addRow("Путь:", self.path_edit)
         layout.addRow("Источник:", self.source_combo)
         layout.addRow("Адрес:", self.address_edit)
         layout.addRow("Тип:", self.type_combo)
-        layout.addRow("Значение при дисконекте:", self.disconnect_edit)
+        layout.addRow("✅ Отслеживание:", self.enabled_check)
+        layout.addRow("⏱ Период опроса (с):", self.interval_spin)
+        layout.addRow("⚡ Значение при дисконекте:", self.disconnect_edit)
 
         btn_layout = QHBoxLayout()
         save_btn = QPushButton("💾 Сохранить"); cancel_btn = QPushButton("❌ Отмена")
@@ -71,14 +84,18 @@ class TagEditDialog(QDialog):
                 elif t == "float32": disc_val = float(disc_str)
                 else: disc_val = disc_str
             except ValueError:
-                QMessageBox.warning(self, "Ошибка формата", f"Неверный формат для значения при дисконекте")
+                QMessageBox.warning(self, "Ошибка формата", "Неверный формат для значения при дисконекте")
                 return {}
+        
+        interval = self.interval_spin.value()
         return {
             "name": self.name_edit.text().strip(),
             "path": self.path_edit.text().strip(),
             "source": self.source_combo.currentText(),
             "address": self.address_edit.text().strip(),
             "type": self.type_combo.currentText(),
+            "enabled": self.enabled_check.isChecked(),
+            "poll_interval": interval if interval > 0.1 else None,  # None = использовать драйвер
             "disconnect_value": disc_val
         }
 
@@ -93,7 +110,7 @@ class ServerBackend:
     async def _run_async(self):
         # 1. Загрузка тегов из проекта
         tags_data = self.project.get("tags", [])
-        valid_keys = {"name", "path", "source", "address", "type", "disconnect_value"}
+        valid_keys = {"name", "path", "source", "address", "type", "disconnect_value", "enabled", "poll_interval"}
         self.registry.tags = {
             t["name"]: Tag(**{k: v for k, v in t.items() if k in valid_keys})
             for t in tags_data if t.get("name")
@@ -130,7 +147,7 @@ class ServerBackend:
         while not self.cmd_queue.empty():
             try:
                 cmd = self.cmd_queue.get_nowait(); action = cmd["action"]; data = cmd.get("data", {})
-                valid_keys = {"name", "path", "source", "address", "type", "disconnect_value"}
+                valid_keys = {"name", "path", "source", "address", "type", "disconnect_value", "enabled", "poll_interval"}
                 
                 if action == "add_tag":
                     tag_kwargs = {k: data.get(k) for k in valid_keys}
