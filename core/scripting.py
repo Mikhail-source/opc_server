@@ -1,3 +1,4 @@
+# core/scripting.py
 import asyncio
 import logging
 import time
@@ -5,24 +6,26 @@ import threading
 import math
 from pathlib import Path
 from lupa import LuaRuntime
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+HEAVY_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="LuaHeavy", max_workers=2)
 
 class LuaEngine:
     def __init__(self, registry, log_queue=None):
         self.registry = registry
-        self.log_queue = log_queue  # ← новая очередь для GUI
+        self.log_queue = log_queue
         self._lua_lock = threading.Lock()
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         
         gl = self.lua.globals()
         gl['tag_get'] = self._tag_get
         gl['tag_set'] = self._tag_set
-        gl['log']     = self._log  # ← переопределён ниже
-        gl['time']    = time.time
-        gl['math']    = math
+        gl['log'] = self._log
+        gl['time'] = time.time
+        gl['math'] = math
         gl['heavy_compute'] = self._heavy_compute
-
+        
         self._func = None
         self._running = False
         self._task = None
@@ -36,8 +39,6 @@ class LuaEngine:
             return
         try:
             code = path.read_text()
-            # Оборачиваем в функцию, чтобы локальные переменные (local x) 
-            # очищались после каждого выполнения, но глобальные сохранялись
             self._func = self.lua.execute(f"return function() {code} end")
             logger.info(f"✅ Lua script loaded: {path.name}")
         except Exception as e:
@@ -63,43 +64,37 @@ class LuaEngine:
     async def _run_loop(self, interval: float):
         while self._running:
             try:
-                self._execute()
+                # 🚀 Выполняем Lua в фоне, НЕ блокируя asyncio
+                await asyncio.to_thread(self._execute)
             except Exception as e:
                 logger.error(f"❌ Script execution error: {e}")
             await asyncio.sleep(interval)
 
     def _execute(self):
         if self._func:
-            # Функция вызывается без аргументов, т.к. globals уже настроены
-            self._func()
+            with self._lua_lock:
+                self._func()
 
     def _tag_get(self, name: str):
-        tag = self.registry.tags.get(name)
-        return tag.value if tag else None
+        return self.registry.get_tag_value_sync(name)
 
     def _tag_set(self, name: str, value):
-        if name in self.registry.tags:
-            tag = self.registry.tags[name]
-            tag.value = value
-            tag.quality = "Good"
-            tag.timestamp = time.time()
-        else:
-            from shared.models import Tag
-            self.registry.tags[name] = Tag(
-                name=name, value=value, type="float32", source="script", quality="Good"
-            )
+        self.registry.update_tag_sync(name, value, "Good")
 
     def _log(self, msg: str):
-        # Вывод в стандартный логгер + отправка в GUI
         logger.info(f"[LUA] {msg}")
         if self.log_queue:
             try:
                 self.log_queue.put_nowait(f"{time.strftime('%H:%M:%S')} {msg}")
             except:
-                pass  # Пропускаем, если очередь переполнена
+                pass
+
+    def _heavy_compute(self, python_callable, *args, **kwargs):
+        """Запускает CPU-bound функцию в отдельном потоке"""
+        future = HEAVY_EXECUTOR.submit(python_callable, *args, **kwargs)
+        return future.result(timeout=5.0)
 
     def reload(self):
-        """Перезагрузка скрипта без остановки сервера"""
         if self._path:
             self.load_script(self._path)
             if self._func and self._running:

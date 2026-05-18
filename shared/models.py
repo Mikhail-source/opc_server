@@ -4,10 +4,10 @@ from typing import Any
 @dataclass
 class Tag:
     name: str
-    source: str = ""
     address: str = ""
     type: str = "float32"
-    source: str = "" 
+    source: str = ""
+    path: str = ""          # ← Новое поле: "Цех 1/Участок/Оборудование"
     value: Any = None
     quality: str = "Unknown"
     timestamp: float = 0.0

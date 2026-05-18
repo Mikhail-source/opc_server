@@ -1,4 +1,4 @@
----
+# config/tags.yaml
 drivers:
 - name: mb_tcp_1
   type: modbus_tcp
@@ -8,33 +8,54 @@ drivers:
 
 - name: internal_1
   type: internal
-  persistence_file: data/my_tags.json    # опционально
-  save_interval: 5.0                     # опционально
+  persistence_file: data/internal_tags.json
 
 tags:
-  # Внешние теги (Modbus)
-- name: Setpoint_Temp
+  # Цех 1
+- name: Temp_Reactor_1
+  path: ''
+  source: mb_tcp_1
+  address: 4x0010
+  type: float32
+- name: Pressure_Reactor_1
+  path: ''
+  source: mb_tcp_1
+  address: 4x0012
+  type: float32
+- name: Valve_Inlet_1
+  path: ''
+  source: mb_tcp_1
+  address: 80
+  type: bool
+- name: Temp_Mixer_1
+  path: ''
+  source: mb_tcp_1
+  address: 4x0100
+  type: float32
+- name: Temp_Furnace_1
+  path: ''
+  source: mb_tcp_1
+  address: 4x0200
+  type: float32
+- name: Temp_Furnace_2
+  path: ''
+  source: mb_tcp_1
+  address: 4x0202
+  type: float32
+- name: Setpoint_Global
+  path: ''
   source: internal
   address: ''
   type: float32
   value: 75.0
-- name: Alarm_HighTemp
+- name: Alarm_Active
+  path: ''
   source: internal
   address: ''
   type: bool
   value: false
-- name: Calculated_Avg
+- name: Pump_Status
+  path: ''
   source: internal
   address: ''
   type: float32
-  value: 0.0
-- name: Temp
-  source: internal
-  address: ''
-  type: float32
-  value: 5.0
-- name: Temp_Reactor
-  source: internal
-  address: ''
-  type: float32
-  value: 10.6
