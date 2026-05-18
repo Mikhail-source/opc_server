@@ -161,15 +161,21 @@ class ModbusTcpDriver(BaseDriver):
                             t.value = self._decode_value(raw_data[idx:idx+step], t.type, fc)
                             t.quality = "Good"
                         except Exception as e:
-                            t.value, t.quality = None, "Bad"
                             logger.error(f"Decode error {t.name}: {e}")
+                            t.value = getattr(t, 'disconnect_value', None) or t.value
+                            t.quality = "Bad"
                         t.timestamp = max_loop
                         idx += step
                         updated.append(t)
                 except Exception as e:
                     logger.error(f"Read chunk failed: {e}")
                     for t in chunk:
-                        t.quality, t.value = "Bad", None
+                        t.quality = "Bad"
+                        t.timestamp = asyncio.get_event_loop().time()
+                        # 🔹 Логика значения при дисконекте
+                        if getattr(t, 'disconnect_value', None) is not None:
+                            t.value = t.disconnect_value
+                        # Иначе: t.value НЕ меняется → остаётся последнее известное
                         updated.append(t)
 
         return updated

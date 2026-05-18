@@ -25,9 +25,10 @@ class TagEditDialog(QDialog):
     def __init__(self, parent=None, tag_data: Optional[Dict] = None):
         super().__init__(parent)
         self.setWindowTitle("Редактор тега" if tag_data else "Новый тег")
-        self.setModal(True); self.resize(420, 400)
+        self.setModal(True); self.resize(420, 350)
         self.tag_data = tag_data or {}
         layout = QFormLayout()
+        
         self.name_edit = QLineEdit(self.tag_data.get("name", ""))
         self.path_edit = QLineEdit(self.tag_data.get("path", ""))
         self.path_edit.setPlaceholderText("Цех/Участок/Оборудование")
@@ -38,13 +39,20 @@ class TagEditDialog(QDialog):
         self.type_combo = QComboBox()
         self.type_combo.addItems(["float32", "bool", "int16", "uint16", "int32", "uint32", "string"])
         self.type_combo.setCurrentText(self.tag_data.get("type", "float32"))
-        self.value_edit = QLineEdit(str(self.tag_data.get("value", "") if self.tag_data.get("value") is not None else ""))
+        
+        # 🔹 Поле значения при дисконекте (опциональное)
+        self.disconnect_edit = QLineEdit()
+        d_val = self.tag_data.get("disconnect_value")
+        self.disconnect_edit.setText(str(d_val) if d_val is not None else "")
+        self.disconnect_edit.setPlaceholderText("Оставьте пустым для сохранения последнего значения")
+
         layout.addRow("Имя:", self.name_edit)
         layout.addRow("Путь (иерархия):", self.path_edit)
         layout.addRow("Источник:", self.source_combo)
         layout.addRow("Адрес:", self.address_edit)
         layout.addRow("Тип:", self.type_combo)
-        layout.addRow("Нач. значение:", self.value_edit)
+        layout.addRow("Значение при дисконекте:", self.disconnect_edit)
+
         btn_layout = QHBoxLayout()
         save_btn = QPushButton("💾 Сохранить"); cancel_btn = QPushButton("❌ Отмена")
         save_btn.clicked.connect(self.accept); cancel_btn.clicked.connect(self.reject)
@@ -53,19 +61,26 @@ class TagEditDialog(QDialog):
         self.setLayout(layout)
 
     def get_data(self) -> Dict[str, Any]:
-        val_str = self.value_edit.text().strip(); t = self.type_combo.currentText(); val = None
-        if val_str:
+        disc_str = self.disconnect_edit.text().strip()
+        t = self.type_combo.currentText()
+        disc_val = None
+        if disc_str:
             try:
-                if t == "bool": val = val_str.lower() in ("1", "true", "yes", "вкл", "on")
-                elif t in ("int16", "uint16", "int32", "uint32"): val = int(val_str)
-                elif t == "float32": val = float(val_str)
-                else: val = val_str
+                if t == "bool": disc_val = disc_str.lower() in ("1", "true", "yes", "вкл", "on")
+                elif t in ("int16", "uint16", "int32", "uint32"): disc_val = int(disc_str)
+                elif t == "float32": disc_val = float(disc_str)
+                else: disc_val = disc_str
             except ValueError:
-                QMessageBox.warning(self, "Ошибка формата", f"Неверный формат для типа {t}")
+                QMessageBox.warning(self, "Ошибка формата", f"Неверный формат для значения при дисконекте")
                 return {}
-        return {"name": self.name_edit.text().strip(), "path": self.path_edit.text().strip(),
-                "source": self.source_combo.currentText(), "address": self.address_edit.text().strip(),
-                "type": self.type_combo.currentText(), "value": val}
+        return {
+            "name": self.name_edit.text().strip(),
+            "path": self.path_edit.text().strip(),
+            "source": self.source_combo.currentText(),
+            "address": self.address_edit.text().strip(),
+            "type": self.type_combo.currentText(),
+            "disconnect_value": disc_val
+        }
 
 class ServerBackend:
     def __init__(self, update_q, cmd_q, log_q, project_data: Dict):
@@ -78,7 +93,11 @@ class ServerBackend:
     async def _run_async(self):
         # 1. Загрузка тегов из проекта
         tags_data = self.project.get("tags", [])
-        self.registry.tags = {t["name"]: Tag(**{k:v for k,v in t.items() if k in ["name","path","source","address","type","value"]}) for t in tags_data}
+        valid_keys = {"name", "path", "source", "address", "type", "disconnect_value"}
+        self.registry.tags = {
+            t["name"]: Tag(**{k: v for k, v in t.items() if k in valid_keys})
+            for t in tags_data if t.get("name")
+        }
         logger.info(f"✅ Загружено тегов из проекта: {len(self.registry.tags)}")
 
         # 2. Lua
@@ -111,20 +130,28 @@ class ServerBackend:
         while not self.cmd_queue.empty():
             try:
                 cmd = self.cmd_queue.get_nowait(); action = cmd["action"]; data = cmd.get("data", {})
+                valid_keys = {"name", "path", "source", "address", "type", "disconnect_value"}
+                
                 if action == "add_tag":
-                    tag = Tag(**{k:data.get(k) for k in ["name","path","source","address","type","value"]})
-                    self.registry.tags[tag.name] = tag
-                    self.project.setdefault("tags", []).append({**data})
+                    tag_kwargs = {k: data.get(k) for k in valid_keys}
+                    self.registry.tags[data["name"]] = Tag(**tag_kwargs)
+                    self.project.setdefault("tags", []).append(tag_kwargs)
+                    
                 elif action == "update_tag":
-                    old = data["old_name"]; new = Tag(**data["new"])
-                    self.registry.tags.pop(old, None); self.registry.tags[new.name] = new
+                    old = data["old_name"]; new_data = data["new"]
+                    new_kwargs = {k: new_data.get(k) for k in valid_keys}
+                    self.registry.tags.pop(old, None)
+                    self.registry.tags[new_data["name"]] = Tag(**new_kwargs)
                     for i, t in enumerate(self.project["tags"]):
-                        if t.get("name") == old: self.project["tags"][i] = {**data["new"]}; break
+                        if t.get("name") == old: self.project["tags"][i] = new_kwargs; break
+                        
                 elif action == "delete_tag":
                     self.registry.tags.pop(data["name"], None)
                     self.project["tags"] = [t for t in self.project["tags"] if t.get("name") != data["name"]]
+                    
                 elif action == "reload_script":
                     self.lua_engine.reload(data.get("content", ""))
+                    
                 self.cmd_queue.task_done()
             except queue.Empty: break
 
